@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Backtest Visualizer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+  :root{--bg:#0a0c11;--card:#13161d;--line:#222732;--ink:#eef2f8;--muted:#8a93a3;--faint:#586172;
+    --up:#2fd98a;--down:#ff5d6c;--accent:#5ad1ff;--gold:#ffcf4d;}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:'Outfit',sans-serif;background:var(--bg);color:var(--ink);min-height:100vh;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1200px;margin:0 auto;padding:26px 22px 70px}
+  h1{font-weight:700;font-size:25px}h1 b{color:var(--accent)}
+  header p{color:var(--muted);font-size:13px;margin:4px 0 20px}
+  .mono{font-family:'IBM Plex Mono',monospace}
+  .bar{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:22px}
+  .drop{border:1.5px dashed var(--line);border-radius:11px;padding:11px 18px;cursor:pointer;color:var(--muted);font-size:13.5px;transition:all .18s}
+  .drop:hover,.drop.drag{border-color:var(--accent);color:var(--ink)}
+  select,input[type=number]{background:var(--card);border:1px solid var(--line);border-radius:9px;padding:10px 12px;color:var(--ink);font-family:inherit;font-size:13.5px;outline:none}
+  .bar label{font-size:12.5px;color:var(--muted)}
+  .bar .ig{display:flex;align-items:center;gap:6px}
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:14px;margin-bottom:20px}
+  .stat{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:15px 16px}
+  .stat .l{font-size:10.5px;letter-spacing:1px;text-transform:uppercase;color:var(--faint)}
+  .stat .v{font-family:'IBM Plex Mono';font-size:22px;font-weight:600;margin-top:5px}
+  .stat .v.up{color:var(--up)}.stat .v.down{color:var(--down)}.stat .v.accent{color:var(--accent)}.stat .v.gold{color:var(--gold)}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px;margin-bottom:18px}
+  .card h2{font-size:11px;letter-spacing:1.3px;text-transform:uppercase;color:var(--faint);margin-bottom:14px;font-weight:600}
+  canvas{display:block;width:100%}
+  .heat{overflow-x:auto}
+  table.hm{border-collapse:collapse;font-family:'IBM Plex Mono';font-size:11.5px}
+  table.hm th{color:var(--faint);font-weight:500;padding:5px 8px;font-size:10.5px}
+  table.hm td{padding:7px 9px;text-align:center;border-radius:5px;color:#0a0c11;font-weight:600;min-width:46px}
+  table.hm td.empty{background:none;color:var(--faint);font-weight:400}
+  table.hm td.yr{background:none;color:var(--muted);font-weight:600}
+  table.hm td.tot{color:var(--ink);font-weight:700;border-left:2px solid var(--line)}
+  .err{color:var(--down);font-size:13px;margin-left:8px}
+  .empty-state{text-align:center;padding:50px;color:var(--faint);font-style:italic}
+  textarea{width:100%;height:120px;background:#0d1118;border:1px solid var(--line);border-radius:10px;padding:11px;font-family:'IBM Plex Mono';font-size:11.5px;color:var(--ink);outline:none;resize:vertical;margin-top:8px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Backtest <b>Visualizer</b></h1>
+    <p>Drop a trades CSV (or paste below) → equity curve, drawdown, Sharpe and a monthly-returns heatmap.</p>
+  </header>
+  <div class="bar">
+    <label class="drop" id="drop">⤓ Drop CSV / click to choose<input type="file" id="file" accept=".csv,text/csv" hidden></label>
+    <div class="ig"><label>Start capital £</label><input id="cap" type="number" value="10000" step="1000"></div>
+    <div class="ig"><label>Values are</label><select id="mode"><option value="auto">auto-detect</option><option value="pnl">£ P&L / trade</option><option value="ret">% return / trade</option></select></div>
+    <span class="err" id="err"></span>
+  </div>
+
+  <div id="content"><div class="empty-state">Load some trades to begin. A sample dataset is loaded by default — drop your own to replace it.</div></div>
+
+  <div class="card">
+    <h2>Paste CSV</h2>
+    <textarea id="paste" spellcheck="false" placeholder="date,pnl&#10;2024-01-03,120&#10;2024-01-08,-65 …"></textarea>
+    <div style="font-size:11.5px;color:var(--faint);margin-top:6px">Columns auto-detected: a <b>date</b> column and a <b>pnl / profit / return / result</b> column. Header row optional.</div>
+  </div>
+</div>
+
+<script>
+(function(){
+  const $=id=>document.getElementById(id);
+  let trades=[]; // {date:Date, val:number}
+  const gbp=n=>(n<0?"−£":"£")+Math.abs(n).toLocaleString("en-GB",{maximumFractionDigits:0});
+
+  function parseCSV(text){
+    const lines=text.split(/\r?\n/).map(l=>l.trim()).filter(l=>l&&l[0]!=="#");
+    if(!lines.length)return[];
+    let di=0,vi=1,start=0;
+    const first=lines[0].split(/[,;\t]/).map(s=>s.trim());
+    const isHeader=first.some(c=>isNaN(parseFloat(c))&&!Date.parse(c));
+    if(isHeader){start=1;const low=first.map(s=>s.toLowerCase());
+      const findD=low.findIndex(c=>/date|time|day/.test(c));if(findD>=0)di=findD;
+      const findV=low.findIndex(c=>/pnl|p&l|profit|return|ret|result|gain|net/.test(c));if(findV>=0)vi=findV;
+    }
+    const out=[];
+    for(let i=start;i<lines.length;i++){const p=lines[i].split(/[,;\t]/).map(s=>s.trim());
+      const d=new Date(p[di]);const v=parseFloat((p[vi]||"").replace(/[£$,%]/g,""));
+      if(!isNaN(v)){out.push({date:isNaN(d)?null:d,val:v});}}
+    return out;
+  }
+
+  function detectMode(){let m=$("mode").value;if(m!=="auto")return m;
+    const mx=Math.max(...trades.map(t=>Math.abs(t.val)));return mx<=1.5?"ret":"pnl";}
+
+  function analyse(){
+    if(!trades.length){$("content").innerHTML='<div class="empty-state">No valid trades found.</div>';return;}
+    const cap=+$("cap").value||10000;const mode=detectMode();
+    let eq=cap;const curve=[{i:0,eq,date:trades[0].date}];const rets=[];
+    let grossW=0,grossL=0,wins=0;
+    trades.forEach((t,i)=>{
+      let r;
+      if(mode==="ret"){r=t.val;eq=eq*(1+r);}else{r=t.val/eq;eq=eq+t.val;}
+      rets.push(r);const pnl=mode==="ret"?(curve[curve.length-1].eq*r):t.val;
+      if(pnl>=0){grossW+=pnl;wins++;}else grossL+=-pnl;
+      curve.push({i:i+1,eq,date:t.date});
+    });
+    // drawdown
+    let peak=-Infinity,maxDD=0,ddCurve=[];
+    curve.forEach(c=>{peak=Math.max(peak,c.eq);const dd=(c.eq-peak)/peak;maxDD=Math.min(maxDD,dd);ddCurve.push(dd);});
+    // sharpe
+    const mean=rets.reduce((a,b)=>a+b,0)/rets.length;
+    const sd=Math.sqrt(rets.reduce((a,b)=>a+(b-mean)**2,0)/rets.length)||1e-9;
+    const sharpe=mean/sd;
+    let tradesPerYear=trades.length;
+    const ds=trades.filter(t=>t.date);
+    if(ds.length>1){const span=(ds[ds.length-1].date-ds[0].date)/(365.25*86400000);if(span>0.05)tradesPerYear=trades.length/span;}
+    const sharpeAnn=sharpe*Math.sqrt(tradesPerYear);
+    const totRet=(eq-cap)/cap*100;
+    const pf=grossL>0?grossW/grossL:Infinity;
+    // monthly
+    const monthly=monthlyReturns(curve,trades,mode,cap);
+    render({cap,eq,totRet,maxDD,sharpe,sharpeAnn,wr:wins/trades.length*100,pf,n:trades.length,curve,ddCurve,monthly,mode});
+  }
+
+  function monthlyReturns(curve,trades,mode,cap){
+    // bucket by YYYY-MM using equity at month boundaries
+    const buckets={};let prevEq=cap;
+    for(let i=0;i<trades.length;i++){const d=trades[i].date;const key=d?d.getFullYear()+"-"+(d.getMonth()):"n/a";
+      const e0=curve[i].eq,e1=curve[i+1].eq;
+      if(!buckets[key])buckets[key]={start:e0,end:e1,y:d?d.getFullYear():0,m:d?d.getMonth():0};
+      buckets[key].end=e1;}
+    return Object.entries(buckets).filter(([k])=>k!=="n/a").map(([k,b])=>({y:b.y,m:b.m,ret:(b.end-b.start)/b.start*100}));
+  }
+
+  function render(s){
+    const MON=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+    const best=s.monthly.length?Math.max(...s.monthly.map(x=>x.ret)):0;
+    const worst=s.monthly.length?Math.min(...s.monthly.map(x=>x.ret)):0;
+    $("content").innerHTML=`
+      <div class="stats">
+        <div class="stat"><div class="l">Total return</div><div class="v ${s.totRet>=0?"up":"down"}">${s.totRet>=0?"+":""}${s.totRet.toFixed(1)}%</div></div>
+        <div class="stat"><div class="l">Final equity</div><div class="v">${gbp(s.eq)}</div></div>
+        <div class="stat"><div class="l">Max drawdown</div><div class="v down">${(s.maxDD*100).toFixed(1)}%</div></div>
+        <div class="stat"><div class="l">Sharpe (ann.)</div><div class="v ${s.sharpeAnn>1?"up":s.sharpeAnn>0?"gold":"down"}">${s.sharpeAnn.toFixed(2)}</div></div>
+        <div class="stat"><div class="l">Win rate</div><div class="v accent">${s.wr.toFixed(0)}%</div></div>
+        <div class="stat"><div class="l">Profit factor</div><div class="v ${s.pf>=1.5?"up":s.pf>=1?"gold":"down"}">${isFinite(s.pf)?s.pf.toFixed(2):"∞"}</div></div>
+        <div class="stat"><div class="l">Trades</div><div class="v">${s.n}</div></div>
+        <div class="stat"><div class="l">Best / worst mo.</div><div class="v" style="font-size:16px"><span class="up">+${best.toFixed(1)}%</span> / <span class="down">${worst.toFixed(1)}%</span></div></div>
+      </div>
+      <div class="card"><h2>Equity Curve</h2><canvas id="eqc"></canvas></div>
+      <div class="card"><h2>Drawdown (underwater)</h2><canvas id="ddc"></canvas></div>
+      <div class="card"><h2>Monthly Returns Heatmap</h2><div class="heat" id="heat"></div></div>`;
+    drawEquity(s.curve);drawDD(s.ddCurve);drawHeat(s.monthly,MON);
+  }
+
+  function cvSetup(id,h){const cv=$(id);const w=cv.clientWidth;const DPR=devicePixelRatio||1;
+    cv.width=w*DPR;cv.height=h*DPR;cv.style.height=h+"px";const c=cv.getContext("2d");c.setTransform(DPR,0,0,DPR,0,0);return{c,w,h};}
+  function drawEquity(curve){const {c,w,h}=cvSetup("eqc",260);const pad={l:62,r:14,t:14,b:22};
+    const eqs=curve.map(p=>p.eq);const lo=Math.min(...eqs),hi=Math.max(...eqs);const a=lo-(hi-lo)*0.08,b=hi+(hi-lo)*0.08;
+    const X=i=>pad.l+(w-pad.l-pad.r)*i/(curve.length-1),Y=v=>pad.t+(h-pad.t-pad.b)*(1-(v-a)/(b-a));
+    c.clearRect(0,0,w,h);c.strokeStyle="#222732";c.fillStyle="#586172";c.font="11px IBM Plex Mono";
+    for(let i=0;i<=4;i++){const v=a+(b-a)*i/4;const y=Y(v);c.beginPath();c.moveTo(pad.l,y);c.lineTo(w-pad.r,y);c.stroke();c.fillText("£"+Math.round(v).toLocaleString(),6,y+3);}
+    const start=curve[0].eq;
+    // fill
+    const grad=c.createLinearGradient(0,pad.t,0,h);grad.addColorStop(0,"rgba(90,209,255,0.25)");grad.addColorStop(1,"rgba(90,209,255,0)");
+    c.beginPath();curve.forEach((p,i)=>{i?c.lineTo(X(i),Y(p.eq)):c.moveTo(X(i),Y(p.eq));});
+    c.lineTo(X(curve.length-1),h-pad.b);c.lineTo(X(0),h-pad.b);c.closePath();c.fillStyle=grad;c.fill();
+    c.strokeStyle="#5ad1ff";c.lineWidth=2;c.beginPath();curve.forEach((p,i)=>{i?c.lineTo(X(i),Y(p.eq)):c.moveTo(X(i),Y(p.eq));});c.stroke();
+    c.strokeStyle="rgba(138,147,163,0.4)";c.setLineDash([4,4]);c.beginPath();c.moveTo(pad.l,Y(start));c.lineTo(w-pad.r,Y(start));c.stroke();c.setLineDash([]);
+  }
+  function drawDD(dd){const {c,w,h}=cvSetup("ddc",130);const pad={l:62,r:14,t:10,b:18};
+    const lo=Math.min(...dd,-0.01);const X=i=>pad.l+(w-pad.l-pad.r)*i/(dd.length-1),Y=v=>pad.t+(h-pad.t-pad.b)*(v/lo);
+    c.clearRect(0,0,w,h);c.strokeStyle="#222732";c.fillStyle="#586172";c.font="11px IBM Plex Mono";
+    for(let i=0;i<=2;i++){const v=lo*i/2;const y=Y(v);c.beginPath();c.moveTo(pad.l,y);c.lineTo(w-pad.r,y);c.stroke();c.fillText((v*100).toFixed(0)+"%",6,y+3);}
+    c.beginPath();c.moveTo(X(0),Y(0));dd.forEach((v,i)=>c.lineTo(X(i),Y(v)));c.lineTo(X(dd.length-1),Y(0));c.closePath();
+    c.fillStyle="rgba(255,93,108,0.3)";c.fill();c.strokeStyle="#ff5d6c";c.lineWidth=1.6;c.beginPath();dd.forEach((v,i)=>{i?c.lineTo(X(i),Y(v)):c.moveTo(X(i),Y(v));});c.stroke();
+  }
+  function heatColor(r){const x=Math.max(-1,Math.min(1,r/10));
+    if(x>=0)return`rgba(47,217,138,${0.25+0.7*x})`;return`rgba(255,93,108,${0.25+0.7*-x})`;}
+  function drawHeat(monthly,MON){
+    if(!monthly.length){$("heat").innerHTML='<div style="color:var(--faint)">No dated trades for a monthly view.</div>';return;}
+    const years=[...new Set(monthly.map(m=>m.y))].sort();
+    const map={};monthly.forEach(m=>map[m.y+"-"+m.m]=m.ret);
+    let html='<table class="hm"><thead><tr><th></th>'+MON.map(m=>`<th>${m}</th>`).join("")+'<th>Year</th></tr></thead><tbody>';
+    years.forEach(y=>{html+=`<tr><td class="yr">${y}</td>`;let yr=1;
+      for(let m=0;m<12;m++){const v=map[y+"-"+m];if(v==null){html+='<td class="empty">·</td>';}
+        else{yr*=(1+v/100);html+=`<td style="background:${heatColor(v)}">${v>=0?"+":""}${v.toFixed(1)}</td>`;}}
+      html+=`<td class="tot">${((yr-1)*100>=0?"+":"")}${((yr-1)*100).toFixed(1)}%</td></tr>`;});
+    html+="</tbody></table>";$("heat").innerHTML=html;
+  }
+
+  // io
+  function loadText(t){trades=parseCSV(t);$("err").textContent=trades.length?"":"No valid rows parsed.";analyse();}
+  $("file").onchange=e=>{const f=e.target.files[0];if(f){const r=new FileReader();r.onload=()=>{$("paste").value=r.result.slice(0,5000);loadText(r.result);};r.readAsText(f);}};
+  $("drop").onclick=()=>$("file").click();
+  const dz=$("drop");dz.addEventListener("dragover",e=>{e.preventDefault();dz.classList.add("drag");});
+  dz.addEventListener("dragleave",()=>dz.classList.remove("drag"));
+  dz.addEventListener("drop",e=>{e.preventDefault();dz.classList.remove("drag");const f=e.dataTransfer.files[0];
+    if(f){const r=new FileReader();r.onload=()=>{$("paste").value=r.result.slice(0,5000);loadText(r.result);};r.readAsText(f);}});
+  $("paste").addEventListener("input",()=>loadText($("paste").value));
+  $("cap").addEventListener("input",analyse);$("mode").addEventListener("change",analyse);
+  addEventListener("resize",()=>{if(trades.length)analyse();});
+
+  // sample data: 120 trades, slight edge
+  let seed=42;const rnd=()=>{seed=(seed*1103515245+12345)&0x7fffffff;return seed/0x7fffffff;};
+  let d=new Date("2023-01-05");const samp=["date,pnl"];
+  for(let i=0;i<120;i++){d=new Date(d.getTime()+(2+Math.floor(rnd()*5))*86400000);
+    const win=rnd()<0.46;const v=win?Math.round(60+rnd()*260):-Math.round(50+rnd()*150);
+    samp.push(d.toISOString().slice(0,10)+","+v);}
+  $("paste").value=samp.join("\n");loadText($("paste").value);
+})();
+</script>
+</body>
+</html>
